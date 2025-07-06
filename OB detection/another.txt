@@ -1,0 +1,132 @@
+//@version=5
+indicator("Order Block Detector (Strict Logic)", "OBD vM1", overlay=true, max_boxes_count=500)
+
+// === SETTINGS ===
+min_block_size = input.int(2, title="Min Block Size (ticks)", group="Settings")
+max_block_size = input.int(10, title="Max Block Size (ticks)", group="Settings")
+pivot_left_bars = input.int(3, title="Pivot Left Bars", group="Settings")
+pivot_right_bars = input.int(3, title="Pivot Right Bars", group="Settings")
+max_search_bars = input.int(9, title="Max Search Bars", group="Settings")
+max_historic_OBs = input.int(200, "Max Historic OBs", group="Settings")
+
+// === BOX MANAGEMENT ===
+var box[] bearish_OB_boxes = array.new_box()
+manage_array_size(box[] arr, int max_size) =>
+    if array.size(arr) > max_size
+        box oldest = array.shift(arr)
+        box.delete(oldest)
+
+// === ENGULFING LOGIC ===
+is_engulfed_bar(int bar_idx, int peak_idx, int end_idx, string direction) =>
+    low1 = low[bar_idx]
+    high1 = high[bar_idx]
+    var bool result = false
+    for i = peak_idx + 1 to end_idx
+        if i >= bar_index or bar_index - i > 5000
+            break
+        body_low2 = math.min(open[i], close[i])
+        body_high2 = math.max(open[i], close[i])
+        if direction == "bearish" and body_low2 < low1
+            result := true
+            break
+        else if direction == "bullish" and body_high2 > high1
+            result := true
+            break
+    result
+
+// === PIVOTS ===
+pivotHigh_series = ta.pivothigh(high, pivot_left_bars, pivot_right_bars)
+pivotLow_series = ta.pivotlow(low, pivot_left_bars, pivot_right_bars)
+
+// === BEARISH ORDER BLOCK LOGIC ===
+if not na(pivotHigh_series)
+    peak_index = bar_index - pivot_right_bars
+    if peak_index >= 0 and bar_index - peak_index <= 5000
+        peak_high = high[peak_index]
+        int left_boundary_index = na
+        int search_start = math.max(peak_index - max_search_bars, 0)
+
+        // Search for left engulfed point
+        for i = search_start to peak_index
+            if bar_index - i > 5000
+                break
+            if is_engulfed_bar(i, peak_index, i + max_search_bars, "bearish")
+                left_boundary_index := i
+                break
+
+        float box_top = peak_high
+        float box_bottom = na
+        int box_left_index = na
+        int box_right_index = na
+
+        if not na(left_boundary_index)
+            right_search_end = math.min(left_boundary_index + max_search_bars - 1, bar_index - 2)
+            int right_boundary_index = peak_index
+            for i = peak_index to right_search_end
+                if bar_index - i > 5000
+                    break
+                if is_engulfed_bar(left_boundary_index, peak_index, i + 1, "bearish")
+                    right_boundary_index := i
+            box_left_index := left_boundary_index
+            box_right_index := right_boundary_index
+            box_bottom := low[left_boundary_index]
+        else
+            float left_pivot_low = na
+            int left_pivot_idx = na
+            for i = 1 to max_search_bars
+                idx = peak_index - i
+                if idx < 0 or bar_index - idx > 5000
+                    break
+                if not na(pivotLow_series[idx])
+                    if na(left_pivot_low) or low[idx] < left_pivot_low
+                        left_pivot_low := low[idx]
+                        left_pivot_idx := idx
+
+            float right_pivot_low = na
+            int right_pivot_idx = na
+            for i = 1 to max_search_bars
+                idx = peak_index + i
+                if idx >= bar_index or bar_index - idx > 5000
+                    break
+                if not na(pivotLow_series[idx])
+                    if na(right_pivot_low) or low[idx] < right_pivot_low
+                        right_pivot_low := low[idx]
+                        right_pivot_idx := idx
+
+            float highest_pivot_low = na
+            int highest_pivot_idx = na
+            if not na(left_pivot_low) and not na(right_pivot_low)
+                if left_pivot_low > right_pivot_low
+                    highest_pivot_low := left_pivot_low
+                    highest_pivot_idx := left_pivot_idx
+                else
+                    highest_pivot_low := right_pivot_low
+                    highest_pivot_idx := right_pivot_idx
+            else if not na(left_pivot_low)
+                highest_pivot_low := left_pivot_low
+                highest_pivot_idx := left_pivot_idx
+            else if not na(right_pivot_low)
+                highest_pivot_low := right_pivot_low
+                highest_pivot_idx := right_pivot_idx
+
+            if not na(highest_pivot_idx)
+                if highest_pivot_idx == right_pivot_idx
+                    box_left_index := math.max(highest_pivot_idx - max_search_bars, 0)
+                    box_right_index := highest_pivot_idx
+                else
+                    box_left_index := highest_pivot_idx
+                    box_right_index := math.min(highest_pivot_idx + max_search_bars, bar_index)
+                box_bottom := highest_pivot_low
+            else
+                box_left_index := math.max(peak_index - 4, 0)
+                box_right_index := math.min(peak_index + 4, bar_index)
+                if peak_index - 4 >= 0 and peak_index + 4 < bar_index
+                    box_bottom := math.max(low[peak_index - 4], low[peak_index + 4])
+
+        // === Draw Box if Valid ===
+        if not na(box_left_index) and not na(box_right_index) and not na(box_bottom) and not na(box_top)
+            box_height = box_top - box_bottom
+            if box_height >= syminfo.mintick * min_block_size and box_height <= syminfo.mintick * max_block_size
+                my_box = box.new(left = time[box_left_index],right = time[box_right_index],top = box_top,bottom = box_bottom,xloc = xloc.bar_time,bgcolor = color.new(color.red, 80),border_color = color.new(color.red, 40))
+                array.push(bearish_OB_boxes, my_box)
+                manage_array_size(bearish_OB_boxes, max_historic_OBs)

@@ -1,0 +1,152 @@
+//@version=5
+indicator("Order Block Detector (Strict Logic)", "OBD vM1", overlay=true, max_boxes_count=500)
+
+// --- SETTINGS ---
+min_block_size = input.int(2, title="Min Block Size", group="Settings")
+max_block_size = input.int(10, title="Max Block Size", group="Settings")
+pivot_left_bars = input.int(1, title="Pivot Left Bars", group="Settings")
+pivot_right_bars = input.int(1, title="Pivot Right Bars", group="Settings")
+max_historic_OBs = input.int(500, "Max Historic OBs", group="Settings")
+engulf_lookahead = input.int(9, "MAx e=look", group="Settings")
+// --- ARRAYS FOR STORING BOXES ---
+var box[] bearish_OB_boxes = array.new_box()
+var box[] bullish_OB_boxes = array.new_box()
+
+// --- FUNCTION TO MANAGE ARRAY SIZE ---
+manage_array_size(box[] arr, int max_size) =>
+    if array.size(arr) > max_size
+        box oldest_box = array.shift(arr)
+        box.delete(oldest_box)
+
+// --- ENGULFING CHECK FUNCTION ---
+// Bearish version: checks if next `n` bars engulf the low of the wick
+is_bearish_engulfed(float wick, int start) =>
+    for i = 0 to engulf_lookahead - 1
+        idx = start - i
+        if idx >= 0
+            open_ = open[idx]
+            close_ = close[idx]
+            body_low = math.min(open_, close_)
+            if body_low < wick
+                // full body engulfs the wick to downside
+                true
+                break
+    false
+    
+// Bullish version: checks if next `n` bars engulf the high of the wick
+is_bullish_engulfed(float wick, int start) =>
+    for i = 0 to engulf_lookahead - 1
+        idx = start - i
+        if idx >= 0
+            open_ = open[idx]
+            close_ = close[idx]
+            body_high = math.max(open_, close_)
+            if body_high > wick
+                // full body engulfs the wick to upside
+                true
+                break
+    false
+
+// --- PRE-CALCULATE PIVOTS ---
+pivotHigh_series = ta.pivothigh(high, pivot_left_bars, pivot_right_bars)
+pivotLow_series = ta.pivotlow(low, pivot_left_bars, pivot_right_bars)
+
+// --- BEARISH ORDER BLOCK LOGIC ---
+if not na(pivotHigh_series[pivot_right_bars])
+    peak_index = bar_index - pivot_right_bars
+    swing_start_index = -1
+
+// searching for the low extremum before the peak
+    for i = 1 to max_block_size - 1
+        idx = peak_index - i
+        rel_idx = bar_index - idx
+        if rel_idx >= 0 and not na(pivotLow_series[rel_idx])
+            swing_start_index := idx
+            break
+// searching for the low extremum after the peak
+    var int right_low_index = na
+    for i = 1 to max_block_size - 1
+        idx = peak_index + i
+        if rel_idx >= 0 and not na(pivotLow_series[idx])
+            right_low_index := idx
+            break
+
+//searching for engulfed bar
+    if swing_start_index > -1
+        block_size = swing_start_index - peak_index + 1
+        if block_size >= min_block_size and block_size <= max_block_size
+            
+            is_valid_ob_found = false
+            box_top = high[peak_index]
+            var float box_bottom = na
+
+            // --- Find the lowest low of the up-swing (Candidate Wick)
+            candidateWickPrice = low[swing_start_index]
+            for j = swing_start_index to peak_index
+                candidateWickPrice := math.min(low[j],candidateWickPrice)
+
+            // --- Check if any subsequent bar's BODY engulfed the candidate wick
+            isEngulfed = false
+            for j = peak_index + 1 to swing_start_index + max_search_bars // Loop from reversal start to current bar
+                if close[j] < open[j] and math.min(open[j], close[j]) < candidateWickPrice
+                    isEngulfed := true
+                    break
+
+            if isEngulfed                
+                box_bottom := low[swing_start_index]
+            else
+                box_bottom := candidateWickPrice // Complex Rule
+                
+                is_valid_ob_found := true
+
+            if is_valid_ob_found
+                new_box = box.new(left=time[swing_start_index], top=box_top, right=time[peak_index], bottom=box_bottom, xloc=xloc.bar_time, bgcolor=color.new(color.red, 80), border_color=color.new(color.red, 40))
+                array.push(bearish_OB_boxes, new_box)
+                manage_array_size(bearish_OB_boxes, max_historic_OBs)
+
+// --- BULLISH ORDER BLOCK LOGIC ---
+if not na(pivotLow_series[pivot_right_bars])
+    valley_index = pivot_right_bars
+    swing_start_index = -1
+
+    for i = 1 to max_block_size - 1
+        if not na(pivotHigh_series[valley_index + i])
+            swing_start_index := valley_index + i
+            break
+            
+    if swing_start_index > -1
+        block_size = swing_start_index - valley_index + 1
+        if block_size >= min_block_size and block_size <= max_block_size
+
+            is_valid_ob_found = false
+            box_bottom = low[valley_index]
+            var float box_top = na
+
+            candidateWickPrice = high[swing_start_index]
+            for j = swing_start_index to valley_index
+                candidateWickPrice := math.max(candidateWickPrice, high[j])
+            
+            isEngulfed = false
+            for j = 0 to valley_index - 1
+                if close[j] > open[j] and math.max(open[j], close[j]) > candidateWickPrice
+                    isEngulfed := true
+                    break
+
+            if isEngulfed
+                isFullEngulf = false
+                for j = 0 to valley_index - 1
+                    if high[j] > high[swing_start_index]
+                        isFullEngulf := true
+                        break
+                
+                if isFullEngulf
+                    box_top := high[swing_start_index] // Simple Rule
+                else
+                    box_top := candidateWickPrice // Complex Rule
+
+                is_valid_ob_found := true
+
+            if is_valid_ob_found
+                new_box = box.new(left=time[swing_start_index], top=box_top, right=time[valley_index], bottom=box_bottom, xloc=xloc.bar_time, bgcolor=color.new(color.green, 80), border_color=color.new(color.green, 40))
+                array.push(bullish_OB_boxes, new_box)
+                manage_array_size(bullish_OB_boxes, max_historic_OBs)
